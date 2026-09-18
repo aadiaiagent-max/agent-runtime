@@ -1,12 +1,14 @@
 export { Agent } from "./agent/Agent.js";
 export type {
   AgentConfig,
+  AgentErrorCode,
   AgentEvent,
   Message,
   Tool,
   ToolCall,
   ToolResult,
 } from "./agent/types.js";
+export { AgentError } from "./agent/types.js";
 export { MockLlmClient, OpenAiCompatibleClient } from "./llm/LlmClient.js";
 export type { LlmClient, LlmResponse } from "./llm/LlmClient.js";
 export { InMemoryStore, JsonFileMemoryStore } from "./memory/MemoryStore.js";
