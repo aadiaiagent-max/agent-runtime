@@ -2,19 +2,23 @@ import type { LlmClient } from "../llm/LlmClient.js";
 import type { MemoryStore } from "../memory/MemoryStore.js";
 import { InMemoryStore } from "../memory/MemoryStore.js";
 import { ToolRegistry, defaultTools } from "../tools/registry.js";
-import type {
-  AgentConfig,
-  AgentEvent,
-  Message,
-  ToolCall,
-  ToolResult,
+import {
+  AgentError,
+  type AgentConfig,
+  type AgentErrorCode,
+  type AgentEvent,
+  type Message,
+  type ToolCall,
+  type ToolResult,
 } from "./types.js";
 
 export class Agent {
   private readonly tools: ToolRegistry;
   private readonly memory: MemoryStore;
   private readonly maxTurns: number;
+  private readonly toolTimeoutMs: number | undefined;
   private readonly systemPrompt: string;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(
     private readonly llm: LlmClient,
@@ -24,22 +28,33 @@ export class Agent {
     this.tools = new ToolRegistry(config.tools ?? defaultTools());
     this.memory = memory ?? new InMemoryStore();
     this.maxTurns = config.maxTurns ?? 6;
+    this.toolTimeoutMs = config.toolTimeoutMs;
+    this.signal = config.signal;
     this.systemPrompt =
       config.systemPrompt ??
       "You are a careful assistant. Use tools when they improve accuracy.";
   }
 
-  async run(userInput: string): Promise<Message> {
+  async run(userInput: string, opts?: { signal?: AbortSignal }): Promise<Message> {
     let final: Message | undefined;
-    for await (const event of this.stream(userInput)) {
+    for await (const event of this.stream(userInput, opts)) {
       if (event.type === "final") final = event.message;
-      if (event.type === "error") throw new Error(event.error);
+      if (event.type === "error") {
+        throw new AgentError(
+          (event.code as AgentErrorCode) ?? "LLM_ERROR",
+          event.error,
+        );
+      }
     }
-    if (!final) throw new Error("Agent finished without a final message");
+    if (!final) throw new AgentError("LLM_ERROR", "Agent finished without a final message");
     return final;
   }
 
-  async *stream(userInput: string): AsyncGenerator<AgentEvent> {
+  async *stream(
+    userInput: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<AgentEvent> {
+    const signal = opts?.signal ?? this.signal;
     const history = await this.memory.list();
     const messages: Message[] = [
       { role: "system", content: this.systemPrompt },
@@ -49,6 +64,15 @@ export class Agent {
     await this.memory.append([{ role: "user", content: userInput }]);
 
     for (let turn = 1; turn <= this.maxTurns; turn++) {
+      if (signal?.aborted) {
+        yield {
+          type: "error",
+          error: "Agent run aborted",
+          code: "ABORTED",
+        };
+        return;
+      }
+
       yield { type: "turn_start", turn };
 
       let response;
@@ -58,7 +82,11 @@ export class Agent {
           tools: this.tools.list(),
         });
       } catch (err) {
-        yield { type: "error", error: err instanceof Error ? err.message : String(err) };
+        yield {
+          type: "error",
+          error: err instanceof Error ? err.message : String(err),
+          code: "LLM_ERROR",
+        };
         return;
       }
 
@@ -86,6 +114,14 @@ export class Agent {
       await this.memory.append([assistantWithTools]);
 
       for (const call of toolCalls) {
+        if (signal?.aborted) {
+          yield {
+            type: "error",
+            error: "Agent run aborted",
+            code: "ABORTED",
+          };
+          return;
+        }
         yield { type: "tool_call", call };
         const result = await this.executeTool(call);
         yield { type: "tool_result", result };
@@ -102,7 +138,11 @@ export class Agent {
       }
     }
 
-    yield { type: "error", error: `Exceeded maxTurns (${this.maxTurns})` };
+    yield {
+      type: "error",
+      error: `Exceeded maxTurns (${this.maxTurns})`,
+      code: "MAX_TURNS",
+    };
   }
 
   private async executeTool(call: ToolCall): Promise<ToolResult> {
@@ -117,16 +157,47 @@ export class Agent {
       };
     }
     try {
-      const output = await tool.execute(call.arguments);
+      const output = await this.withTimeout(
+        Promise.resolve(tool.execute(call.arguments)),
+        this.toolTimeoutMs,
+        call.name,
+      );
       return { toolCallId: call.id, name: call.name, ok: true, output };
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       return {
         toolCallId: call.id,
         name: call.name,
         ok: false,
         output: null,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       };
+    }
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number | undefined,
+    toolName: string,
+  ): Promise<T> {
+    if (timeoutMs === undefined || timeoutMs <= 0) return promise;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new AgentError(
+            "TOOL_TIMEOUT",
+            `Tool "${toolName}" timed out after ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 }
