@@ -2,11 +2,11 @@
 
 A small, typed **tool-calling LLM agent runtime** — streaming events, pluggable memory, and structured tools.
 
-Built as a portfolio project for Senior SWE / AI-agent / AI-platform roles: the kind of core you'd embed inside a product agent, not a chat demo wrapper.
+The kind of core you’d embed inside a product agent, not a chat demo wrapper. Small surface area — readable in one sitting.
 
 ## Why this exists
 
-Most "agent" samples hide the loop. This repo makes the loop explicit:
+Most “agent” samples hide the loop. This repo makes the loop explicit:
 
 1. Model proposes text and/or tool calls
 2. Runtime validates + executes tools
@@ -67,7 +67,7 @@ for await (const event of agent.stream("add 3 + 4")) {
 - **Mock-first** — CI and demos run without vendor keys.
 - **Safe calculator** — expression parser, not `eval`.
 - **OpenAI-compatible escape hatch** — swap in a real model when you have a key.
-- **Tiny surface area** — easy to read in a hiring screen share.
+- **Small surface area** — readable in one sitting.
 
 ## Project layout
 
